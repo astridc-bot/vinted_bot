@@ -1,12 +1,37 @@
-- name: Esecuzione script Wallapop e Vinted
+name: Vinted Monitor Bot
+
+on:
+  schedule:
+    - cron: '*/3 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Configurazione di Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Installazione dipendenze
         run: |
-          python bot.py
-          python vinted_bot.py
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Esecuzione dello script Vinted
+        run: python vinted_bot.py
 
       - name: Salva e aggiorna i file su GitHub
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add seen_items.json seen_vinted_items.json
+          git add seen_vinted_items.json
           git diff-index --quiet HEAD || git commit -m "Chore: aggiornati articoli visti [skip ci]"
           git push
