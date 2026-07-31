@@ -69,7 +69,7 @@ def get_vinted_data():
     now = get_current_time()
     print(f"[{now}] 🔍 Avvio scansione Vinted per keyword: '{SEARCH_KEYWORD}'...", flush=True)
 
-    session = requests.Session()
+    session = cloudscraper.create_scraper()
     session.headers.update({
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
