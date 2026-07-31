@@ -2,7 +2,8 @@ import datetime
 import json
 import os
 import time
-import cloudscraper  # Importato cloudscraper
+import cloudscraper
+from bs4 import BeautifulSoup
 
 # --- CONFIGURAZIONE ---
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1521502269118615622/2KQEzJpDBs6db1w8sI5XLXdRn9_A_vTkIG85p55QwNWcPyHl220vmvJ9acj8uMxGqBi8"
@@ -14,7 +15,6 @@ def get_current_time():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 def send_discord_webhook(content=None, embed=None):
-    # Usiamo cloudscraper/requests per inviare le notifiche a Discord
     payload = {}
     if content:
         payload["content"] = content
@@ -41,22 +41,19 @@ def save_seen_items(seen_set):
 
 def send_discord_alert(item):
     title = item.get("title", "Senza titolo")
-    price = item.get("price", {}).get("amount", item.get("price", "N/A"))
-    currency = item.get("price", {}).get("currency_code", "EUR")
-    item_url = item.get("url") or f"https://www.vinted.it/items/{item.get('id')}"
-    
-    photos = item.get("photos", [])
-    photo_url = photos[0].get("url") if photos else item.get("photo", {}).get("url")
+    price = item.get("price", "N/A")
+    item_url = item.get("url", "https://www.vinted.it")
+    photo_url = item.get("photo")
 
     embed = {
         "title": f"👗 Nuovo capo Vinted: {title}",
         "url": item_url,
         "color": 1752220,
         "fields": [
-            {"name": "💰 Prezzo", "value": f"{price} {currency}", "inline": True},
+            {"name": "💰 Prezzo", "value": price, "inline": True},
             {"name": "🔍 Categoria/Brand", "value": "Derhy", "inline": True}
         ],
-        "footer": {"text": "Vinted Monitor Bot"}
+        "footer": {"text": "Vinted HTML Monitor Bot"}
     }
 
     if photo_url:
@@ -64,11 +61,63 @@ def send_discord_alert(item):
 
     send_discord_webhook(content="@everyone Trovato un nuovo articolo con 'Derhy' nel titolo!", embed=embed)
 
+def parse_vinted_html(html_content):
+    """Estrae gli annunci analizzando il codice HTML della pagina."""
+    soup = BeautifulSoup(html_content, "html.parser")
+    items = []
+    
+    # Cerca i box contenitori degli annunci
+    item_containers = soup.select('div[data-testid="grid-item"], div.feed-grid__item')
+    
+    for container in item_containers:
+        # Estrai il link dell'articolo e l'ID
+        link_elem = container.find("a", href=True)
+        if not link_elem:
+            continue
+            
+        href = link_elem["href"]
+        if "/items/" not in href:
+            continue
+            
+        item_url = href if href.startswith("http") else f"https://www.vinted.it{href}"
+        
+        # Estrai l'ID numerico dall'URL (es. /items/12345678-titolo)
+        try:
+            item_id = href.split("/items/")[1].split("-")[0]
+        except IndexingError:
+            continue
+            
+        # Estrai il titolo dell'immagine/annuncio
+        img_elem = container.find("img")
+        title = img_elem.get("alt", "") if img_elem else ""
+        if not title:
+            title = link_elem.get("title", "Senza titolo")
+            
+        # Estrai la foto
+        photo_url = img_elem.get("src") if img_elem else None
+        
+        # Estrai il prezzo (cerca testi col simbolo €)
+        price = "N/A"
+        price_elem = container.find(lambda tag: tag.name in ["p", "span", "h3"] and "€" in tag.text)
+        if price_elem:
+            price = price_elem.text.strip()
+            
+        # Filtro per la parola chiave
+        if SEARCH_KEYWORD in title.lower():
+            items.append({
+                "id": item_id,
+                "title": title,
+                "price": price,
+                "url": item_url,
+                "photo": photo_url
+            })
+            
+    return items
+
 def get_vinted_data():
     now = get_current_time()
-    print(f"[{now}] 🔍 Avvio scansione Vinted per keyword: '{SEARCH_KEYWORD}'...", flush=True)
+    print(f"[{now}] 🔍 Avvio HTML Scraping per keyword: '{SEARCH_KEYWORD}'...", flush=True)
 
-    # MODIFICA CHIAVE: Creiamo uno scraper che bypassa le sfide Cloudflare
     scraper = cloudscraper.create_scraper(
         browser={
             'browser': 'chrome',
@@ -77,32 +126,19 @@ def get_vinted_data():
         }
     )
 
-    try:
-        # 1. Recupera la home per impostare i cookie di sessione bypassando Cloudflare
-        home_resp = scraper.get("https://www.vinted.it", timeout=15)
-        
-        if home_resp.status_code in (403, 429):
-            print(f"[{now}] ⚠️ ATTENZIONE: Homepage bloccata da Cloudflare/Anti-bot! (HTTP {home_resp.status_code})", flush=True)
-            return None
+    # URL di ricerca HTML pubblica
+    search_url = f"https://www.vinted.it/vetements?search_text={SEARCH_KEYWORD}&order=newest_first"
 
-        # 2. Richiesta all'API di ricerca di Vinted
-        api_url = f"https://www.vinted.it/api/v2/catalog/items?search_text={SEARCH_KEYWORD}&order=newest_first"
-        resp = scraper.get(api_url, timeout=15)
+    try:
+        resp = scraper.get(search_url, timeout=15)
         
         if resp.status_code == 200:
-            raw_items = resp.json().get("items", [])
-            filtered_items = []
-            
-            for item in raw_items:
-                title = str(item.get("title", "")).lower()
-                if SEARCH_KEYWORD in title:
-                    filtered_items.append(item)
-                    
-            print(f"[{now}] ✅ Scansione completata. Trovati {len(filtered_items)} articoli con '{SEARCH_KEYWORD}' nel TITOLO.", flush=True)
+            filtered_items = parse_vinted_html(resp.text)
+            print(f"[{now}] ✅ Scansione HTML completata. Trovati {len(filtered_items)} articoli con '{SEARCH_KEYWORD}' nel TITOLO.", flush=True)
             return filtered_items
 
         elif resp.status_code in (403, 429):
-            print(f"[{now}] ⚠️ ATTENZIONE: API Vinted bloccata da Cloudflare! (HTTP {resp.status_code})", flush=True)
+            print(f"[{now}] ⚠️ ATTENZIONE: Pagina HTML bloccata da Cloudflare! (HTTP {resp.status_code})", flush=True)
             return None
             
         else:
@@ -110,7 +146,7 @@ def get_vinted_data():
             return None
 
     except Exception as e:
-        print(f"[{now}] ❌ Errore durante il recupero da Vinted: {e}", flush=True)
+        print(f"[{now}] ❌ Errore durante lo scraping HTML: {e}", flush=True)
         return None
 
 def check_for_updates(seen_items):
@@ -128,7 +164,7 @@ def check_for_updates(seen_items):
             if item_id:
                 seen_items.add(item_id)
         save_seen_items(seen_items)
-        send_discord_webhook(content=f"🟢 **Vinted Bot attivo**: Inizializzato con {len(seen_items)} articoli. In attesa di nuove uscite!")
+        send_discord_webhook(content=f"🟢 **Vinted HTML Bot attivo**: Inizializzato con {len(seen_items)} articoli con 'Derhy' nel titolo. In attesa di nuove uscite!")
         return seen_items
 
     new_found = False
@@ -147,7 +183,7 @@ def check_for_updates(seen_items):
 
 if __name__ == "__main__":
     seen_items = load_seen_items()
-    print(f"[{get_current_time()}] 🚀 Bot avviato con Cloudscraper. Controllo ogni {CHECK_INTERVAL_SECONDS} secondi...")
+    print(f"[{get_current_time()}] 🚀 Bot HTML avviato. Controllo in corso ogni {CHECK_INTERVAL_SECONDS} secondi...")
     
     while True:
         try:
