@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import requests
+import cloudscraper
 
 # --- CONFIGURAZIONE ---
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1521502269118615622/2KQEzJpDBs6db1w8sI5XLXdRn9_A_vTkIG85p55QwNWcPyHl220vmvJ9acj8uMxGqBi8"
