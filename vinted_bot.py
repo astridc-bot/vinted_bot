@@ -2,13 +2,12 @@ import json
 import os
 import requests
 
-# --- CONFIGURAZIONE DISCORD ---
+# --- CONFIGURAZIONE ---
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1521502269118615622/2KQEzJpDBs6db1w8sI5XLXdRn9_A_vTkIG85p55QwNWcPyHl220vmvJ9acj8uMxGqBi8"
-
 SEARCH_KEYWORD = "derhy"
 SEEN_ITEMS_FILE = "seen_vinted_items.json"
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 def send_discord_webhook(content=None, embed=None):
     payload = {}
@@ -16,7 +15,6 @@ def send_discord_webhook(content=None, embed=None):
         payload["content"] = content
     if embed:
         payload["embeds"] = [embed]
-        
     try:
         requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
     except Exception as e:
@@ -37,21 +35,21 @@ def save_seen_items(seen_set):
 
 def send_discord_alert(item):
     title = item.get("title", "Senza titolo")
-    price = item.get("price", "N/A")
-    currency = item.get("currency", "EUR")
-    item_url = item.get("url", "https://www.vinted.it")
+    price = item.get("price", {}).get("amount", item.get("price", "N/A"))
+    currency = item.get("price", {}).get("currency_code", "EUR")
+    item_url = item.get("url") or f"https://www.vinted.it/items/{item.get('id')}"
     
-    # Foto dell'articolo
+    # Recupera foto
     photos = item.get("photos", [])
-    photo_url = photos[0].get("url") if photos else None
+    photo_url = photos[0].get("url") if photos else item.get("photo", {}).get("url")
 
     embed = {
         "title": f"👗 Nuovo capo Vinted: {title}",
         "url": item_url,
-        "color": 1752220,  # Colore Turchese Vinted
+        "color": 1752220,
         "fields": [
             {"name": "💰 Prezzo", "value": f"{price} {currency}", "inline": True},
-            {"name": "🔍 Brand / Categoria", "value": "Derhy (Donna)", "inline": True}
+            {"name": "🔍 Categoria/Brand", "value": "Derhy", "inline": True}
         ],
         "footer": {"text": "Vinted Monitor Bot"}
     }
@@ -59,7 +57,7 @@ def send_discord_alert(item):
     if photo_url:
         embed["image"] = {"url": photo_url}
 
-    send_discord_webhook(content="@everyone Trovato un nuovo vestito Derhy su Vinted!", embed=embed)
+    send_discord_webhook(content="@everyone Trovato un nuovo articolo con 'Derhy' nel titolo!", embed=embed)
 
 def get_vinted_data():
     session = requests.Session()
@@ -70,11 +68,11 @@ def get_vinted_data():
     })
 
     try:
-        # 1. Visita la home per ottenere i cookie di sessione Vinted
+        # 1. Recupera i cookie di sessione da Vinted Italia
         session.get("https://www.vinted.it", timeout=10)
 
-        # 2. API Vinted: Categoria 1904 = Donna -> Abbigliamento
-        api_url = f"https://www.vinted.it/api/v2/catalog/items?search_text={SEARCH_KEYWORD}&catalog_ids[]=1904&order=newest_first"
+        # 2. Endpoint API di ricerca Vinted
+        api_url = f"https://www.vinted.it/api/v2/catalog/items?search_text={SEARCH_KEYWORD}&order=newest_first"
         
         resp = session.get(api_url, timeout=10)
         
@@ -82,12 +80,14 @@ def get_vinted_data():
             raw_items = resp.json().get("items", [])
             filtered_items = []
             
-            # Filtro per verificare che "derhy" sia presente nel titolo
             for item in raw_items:
-                title = item.get("title", "").lower()
+                title = str(item.get("title", "")).lower()
+                
+                # CONTROLLO RIGIDO: deve contenere "derhy" ESCLUSIVAMENTE NEL TITOLO
                 if SEARCH_KEYWORD in title:
                     filtered_items.append(item)
                     
+            print(f"Trovati {len(filtered_items)} articoli con '{SEARCH_KEYWORD}' nel TITOLO.", flush=True)
             return filtered_items
         else:
             print(f"Errore Vinted HTTP {resp.status_code}", flush=True)
@@ -102,26 +102,20 @@ def main():
     items = get_vinted_data()
 
     if items is None:
-        embed_fail = {
-            "title": "🔴 ERRORE Vinted",
-            "description": "Impossibile connettersi a Vinted (blocco IP o problema di rete).",
-            "color": 15158332
-        }
-        send_discord_webhook(embed=embed_fail)
         return
 
-    # Primo avvio su GitHub Actions: popola la lista senza notificare in massa
+    # Primo avvio: memorizza tutti gli ID attuali per evitare notifiche massive
     if not seen_items:
-        print("Inizializzazione Vinted: salvo gli articoli presenti...", flush=True)
+        print("Inizializzazione: salvo gli ID correnti...", flush=True)
         for item in items:
             item_id = item.get("id")
             if item_id:
                 seen_items.add(item_id)
         save_seen_items(seen_items)
-        send_discord_webhook(content=f"🟢 **Vinted Bot attivo**: Memorizzati {len(seen_items)} articoli **Derhy Donna**. In attesa di nuovi annunci.")
+        send_discord_webhook(content=f"🟢 **Vinted Bot attivo**: Inizializzato con {len(seen_items)} articoli con 'Derhy' nel titolo. In attesa di nuove uscite!")
         return
 
-    # Controllo nuovi annunci reali
+    # Invio notifiche per ogni nuovo ID
     new_found = False
     for item in items:
         item_id = item.get("id")
@@ -132,9 +126,6 @@ def main():
 
     if new_found:
         save_seen_items(seen_items)
-        print("✨ Nuovi articoli Vinted inviati!", flush=True)
-    else:
-        print("Nessun nuovo capo Derhy trovato su Vinted.", flush=True)
 
 if __name__ == "__main__":
     main()
