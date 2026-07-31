@@ -2,6 +2,8 @@ import datetime
 import json
 import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import cloudscraper
 from bs4 import BeautifulSoup
 
@@ -10,6 +12,22 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1521502269118615622/2KQE
 SEARCH_KEYWORD = "derhy"
 SEEN_ITEMS_FILE = "seen_vinted_items.json"
 CHECK_INTERVAL_SECONDS = 30  # Frequenza controllo in secondi
+
+# Dummy HTTP Server per soddisfare l'healthcheck di Render (elimina l'avviso "No open ports")
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Vinted Bot Active & Running!")
+
+    def log_message(self, format, *args):
+        return  # Nasconde i log HTTP per non intasare la console
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    server.serve_forever()
 
 def get_current_time():
     return datetime.datetime.now().strftime("%H:%M:%S")
@@ -62,57 +80,50 @@ def send_discord_alert(item):
     send_discord_webhook(content="@everyone Trovato un nuovo articolo con 'Derhy' nel titolo!", embed=embed)
 
 def parse_vinted_html(html_content):
-    """Estrae gli annunci analizzando il codice HTML della pagina."""
     soup = BeautifulSoup(html_content, "html.parser")
     items = []
     
-    # Cerca i box contenitori degli annunci
-    item_containers = soup.select('div[data-testid="grid-item"], div.feed-grid__item')
+    links = soup.find_all("a", href=True)
     
-    for container in item_containers:
-        # Estrai il link dell'articolo e l'ID
-        link_elem = container.find("a", href=True)
-        if not link_elem:
-            continue
+    for link in links:
+        href = link["href"]
+        if "/items/" in href:
+            item_url = href if href.startswith("http") else f"https://www.vinted.it{href}"
+            clean_url = item_url.split("?")[0]
             
-        href = link_elem["href"]
-        if "/items/" not in href:
-            continue
+            img_elem = link.find("img")
+            title = ""
+            if img_elem and img_elem.get("alt"):
+                title = img_elem.get("alt")
+            elif link.get("title"):
+                title = link.get("title")
+
+            if not title:
+                try:
+                    title = clean_url.split("/items/")[1].replace("-", " ")
+                except IndexError:
+                    title = "Senza titolo"
+
+            photo_url = img_elem.get("src") if img_elem else None
+
+            price = "Vedi su Vinted"
+            parent = link.find_parent("div")
+            if parent:
+                price_elem = parent.find(lambda tag: tag.name in ["p", "span", "div"] and "€" in tag.text)
+                if price_elem:
+                    price = price_elem.text.strip()
+
+            if SEARCH_KEYWORD in title.lower() or SEARCH_KEYWORD in clean_url.lower():
+                items.append({
+                    "id": clean_url,
+                    "title": title.strip().capitalize(),
+                    "price": price,
+                    "url": clean_url,
+                    "photo": photo_url
+                })
             
-        item_url = href if href.startswith("http") else f"https://www.vinted.it{href}"
-        
-        # Estrai l'ID numerico dall'URL (es. /items/12345678-titolo)
-        try:
-            item_id = href.split("/items/")[1].split("-")[0]
-        except IndexingError:
-            continue
-            
-        # Estrai il titolo dell'immagine/annuncio
-        img_elem = container.find("img")
-        title = img_elem.get("alt", "") if img_elem else ""
-        if not title:
-            title = link_elem.get("title", "Senza titolo")
-            
-        # Estrai la foto
-        photo_url = img_elem.get("src") if img_elem else None
-        
-        # Estrai il prezzo (cerca testi col simbolo €)
-        price = "N/A"
-        price_elem = container.find(lambda tag: tag.name in ["p", "span", "h3"] and "€" in tag.text)
-        if price_elem:
-            price = price_elem.text.strip()
-            
-        # Filtro per la parola chiave
-        if SEARCH_KEYWORD in title.lower():
-            items.append({
-                "id": item_id,
-                "title": title,
-                "price": price,
-                "url": item_url,
-                "photo": photo_url
-            })
-            
-    return items
+    unique_items = {item["id"]: item for item in items}.values()
+    return list(unique_items)
 
 def get_vinted_data():
     now = get_current_time()
@@ -126,19 +137,33 @@ def get_vinted_data():
         }
     )
 
-    # URL di ricerca HTML pubblica
+    # HEADERS FONDAMENTALI PER EVITARE L'ERRORE HTTP 406
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.vinted.it/",
+        "Sec-Ch-Ua": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Upgrade-Insecure-Requests": "1"
+    }
+
     search_url = f"https://www.vinted.it/vetements?search_text={SEARCH_KEYWORD}&order=newest_first"
 
     try:
-        resp = scraper.get(search_url, timeout=15)
+        resp = scraper.get(search_url, headers=headers, timeout=15)
         
         if resp.status_code == 200:
             filtered_items = parse_vinted_html(resp.text)
-            print(f"[{now}] ✅ Scansione HTML completata. Trovati {len(filtered_items)} articoli con '{SEARCH_KEYWORD}' nel TITOLO.", flush=True)
+            print(f"[{now}] ✅ Scansione HTML completata. Trovati {len(filtered_items)} articoli con '{SEARCH_KEYWORD}'.", flush=True)
             return filtered_items
 
-        elif resp.status_code in (403, 429):
-            print(f"[{now}] ⚠️ ATTENZIONE: Pagina HTML bloccata da Cloudflare! (HTTP {resp.status_code})", flush=True)
+        elif resp.status_code in (403, 406, 429):
+            print(f"[{now}] ⚠️ ATTENZIONE: Blocco anti-bot Vinted! (HTTP {resp.status_code})", flush=True)
             return None
             
         else:
@@ -158,13 +183,13 @@ def check_for_updates(seen_items):
         return seen_items
 
     if not seen_items:
-        print(f"[{now}] Inizializzazione: salvo gli ID correnti...", flush=True)
+        print(f"[{now}] Inizializzazione: salvo tutti gli articoli correnti per evitare spam...", flush=True)
         for item in items:
             item_id = item.get("id")
             if item_id:
                 seen_items.add(item_id)
         save_seen_items(seen_items)
-        send_discord_webhook(content=f"🟢 **Vinted HTML Bot attivo**: Inizializzato con {len(seen_items)} articoli con 'Derhy' nel titolo. In attesa di nuove uscite!")
+        send_discord_webhook(content=f"🟢 **Vinted Bot riattivato**: Salvati {len(seen_items)} articoli correnti. In attesa di nuove uscite!")
         return seen_items
 
     new_found = False
@@ -174,7 +199,7 @@ def check_for_updates(seen_items):
             send_discord_alert(item)
             seen_items.add(item_id)
             new_found = True
-            print(f"[{now}] 🔔 Nuova notifica inviata per item ID: {item_id}", flush=True)
+            print(f"[{now}] 🔔 Nuova notifica inviata per: {item_id}", flush=True)
 
     if new_found:
         save_seen_items(seen_items)
@@ -182,8 +207,11 @@ def check_for_updates(seen_items):
     return seen_items
 
 if __name__ == "__main__":
+    # Avvia il dummy server HTTP in un thread separato per Render
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    
     seen_items = load_seen_items()
-    print(f"[{get_current_time()}] 🚀 Bot HTML avviato. Controllo in corso ogni {CHECK_INTERVAL_SECONDS} secondi...")
+    print(f"[{get_current_time()}] 🚀 Bot avviato. Controllo ogni {CHECK_INTERVAL_SECONDS} secondi...")
     
     while True:
         try:
